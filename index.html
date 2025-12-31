@@ -448,7 +448,10 @@
 
         }
 
-    </style>
+    
+.ink-paper{background-image:repeating-linear-gradient(to bottom, rgba(148,163,184,.45) 0, rgba(148,163,184,.45) 2px, transparent 2px, transparent 34px);} 
+.ink-hide::placeholder{color:transparent;}
+</style>
 
     <style id="print-page2-scale">
       @media print {
@@ -1222,6 +1225,66 @@ header::after,
 .fixed.bottom-4.left-1\/2.-translate-x-1\/2.z-\[100\].bg-slate-900,
 .fixed.bottom-4.left-1\/2.-translate-x-1\/2.z-\[100\],
 .toast, .toast-message, [class*="toast"], [class*="Toast"]{
+  display:none !important;
+  visibility:hidden !important;
+  opacity:0 !important;
+}
+</style>
+
+
+<style id="ink-overlay-hide-placeholder">
+/* Wenn Handschrift-Overlay aktiv ist: Text + Placeholder im Feld ausblenden */
+.ink-hide{
+  color: transparent !important;
+  -webkit-text-fill-color: transparent !important;
+  caret-color: transparent !important;
+}
+.ink-hide::placeholder{
+  color: transparent !important;
+  -webkit-text-fill-color: transparent !important;
+}
+</style>
+
+
+<style id="print-force-remove-blue-canvas-final">
+@media print {
+  /* FINAL HARD FIX:
+     Entfernt JEDEN hellblauen Hintergrund im Bereich
+     "Ihre Aktuelle Situation", egal ob Popup, Canvas,
+     Inline-Style oder Tailwind /xx */
+  .situation-view-wrapper,
+  .situation-view-wrapper * {
+    background-color: transparent !important;
+    background-image: none !important;
+  }
+
+  /* ABER: Karten & Boxen sollen weiß bleiben */
+  .situation-view-wrapper .bg-white,
+  .situation-view-wrapper aside,
+  .situation-view-wrapper aside * {
+    background-color: #ffffff !important;
+  }
+}
+</style>
+
+<style id="print-hide-blue-kasten-v2">
+@media print{
+  /* Der "blaue Kasten" ist die große Zeichenfläche (Canvas-Layer) – im Druck komplett ausblenden */
+  .situation-view-wrapper .canvas-layer,
+  .situation-view-wrapper canvas{
+    display:none !important;
+    visibility:hidden !important;
+    opacity:0 !important;
+  }
+  /* falls die Fläche über ein Wrapper-DIV kommt: Hintergrund neutralisieren */
+  .situation-view-wrapper .canvas-layer *{
+    background:transparent !important;
+  }
+}
+
+/* Auch im Print-like JPEG Export (jpeg-capture-mode) ausblenden */
+.jpeg-capture-mode .situation-view-wrapper .canvas-layer,
+.jpeg-capture-mode .situation-view-wrapper canvas{
   display:none !important;
   visibility:hidden !important;
   opacity:0 !important;
@@ -2043,33 +2106,153 @@ return (
             const [zoomType, setZoomType] = useState('text'); // 'text' | 'textarea'
             const [zoomValue, setZoomValue] = useState('');
             const zoomSaveRef = useRef(null);
-            const zoomInputRef = useRef(null);
+            const zoomInkCanvasRef = useRef(null);
+            const zoomInkIsDrawingRef = useRef(false);
+            const zoomInkLastRef = useRef({x:0,y:0});
+            const zoomInkDirtyRef = useRef(false);
 
-            const openZoom = (label, type, value, onSave) => {
+            const zoomInputRef = useRef(null);
+            const [zoomInputMode, setZoomInputMode] = useState('pen'); // 'pen' | 'keyboard'
+
+            const openZoom = (label, type, value, onSave, preferredMode = 'pen') => {
                 setZoomLabel(label || '');
                 setZoomType(type || 'text');
                 setZoomValue(value ?? '');
+                zoomInkDirtyRef.current = false;
                 zoomSaveRef.current = onSave || null;
+                setZoomInputMode(preferredMode || 'pen');
                 setZoomOpen(true);
                 setTimeout(() => {
-                    try { zoomInputRef.current && zoomInputRef.current.focus && zoomInputRef.current.focus(); } catch(e){}
+                    if ((preferredMode || 'pen') === 'keyboard') {
+                        try { zoomInputRef.current && zoomInputRef.current.focus && zoomInputRef.current.focus(); } catch(e){}
+                    }
                 }, 50);
             };
 
-            const closeZoom = () => {
+            
+            const initZoomInkCanvas = () => {
+                const canvas = zoomInkCanvasRef.current;
+                if (!canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                const dpr = window.devicePixelRatio || 1;
+                const w = Math.max(1, Math.floor(rect.width * dpr));
+                const h = Math.max(1, Math.floor(rect.height * dpr));
+                if (canvas.width !== w || canvas.height !== h) {
+                    canvas.width = w; canvas.height = h;
+                }
+                const ctx = canvas.getContext('2d');
+                ctx.setTransform(1,0,0,1,0,0);
+                ctx.scale(dpr, dpr);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#0f172a';
+            };
+
+            const clearZoomInk = () => {
+                const canvas = zoomInkCanvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext('2d');
+                const dpr = window.devicePixelRatio || 1;
+                ctx.setTransform(1,0,0,1,0,0);
+                ctx.clearRect(0,0,canvas.width, canvas.height);
+                ctx.scale(dpr, dpr);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#0f172a';
+            };
+
+            const loadZoomInkFromDataUrl = (dataUrl) => {
+                if (!dataUrl) { clearZoomInk(); return; }
+                const img = new Image();
+                img.onload = () => {
+                    clearZoomInk();
+                    const canvas = zoomInkCanvasRef.current;
+                    if (!canvas) return;
+                    const ctx = canvas.getContext('2d');
+                    const rect = canvas.getBoundingClientRect();
+                    // fit image into strip
+                    const scale = Math.min((rect.width-32)/img.width, (rect.height-32)/img.height);
+                    const w = img.width*scale;
+                    const h = img.height*scale;
+                    ctx.drawImage(img, (rect.width-w)/2, (rect.height-h)/2, w, h);
+                };
+                img.src = dataUrl;
+            };
+
+            const zoomInkPointerPos = (e) => {
+                const canvas = zoomInkCanvasRef.current;
+                if (!canvas) return {x:0,y:0};
+                const rect = canvas.getBoundingClientRect();
+                return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+            };
+
+            const zoomInkStart = (e) => {
+                const canvas = zoomInkCanvasRef.current;
+                if (!canvas) return;
+                zoomInkIsDrawingRef.current = true;
+                zoomInkDirtyRef.current = true;
+                try { canvas.setPointerCapture(e.pointerId); } catch(err) {}
+                zoomInkLastRef.current = zoomInkPointerPos(e);
+            };
+
+            const zoomInkMove = (e) => {
+                if (!zoomInkIsDrawingRef.current) return;
+                zoomInkDirtyRef.current = true;
+                const canvas = zoomInkCanvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext('2d');
+                const p = zoomInkPointerPos(e);
+                const last = zoomInkLastRef.current;
+                ctx.beginPath();
+                ctx.moveTo(last.x, last.y);
+                ctx.lineTo(p.x, p.y);
+                ctx.stroke();
+                zoomInkLastRef.current = p;
+            };
+
+            const zoomInkEnd = (e) => {
+                const canvas = zoomInkCanvasRef.current;
+                if (!canvas) return;
+                zoomInkIsDrawingRef.current = false;
+                try { canvas.releasePointerCapture(e.pointerId); } catch(err) {}
+            };
+
+            useEffect(() => {
+                if (!zoomOpen) return;
+                if (zoomInputMode === 'pen' && zoomType === 'ink') {
+                    setTimeout(() => {
+                        initZoomInkCanvas();
+                        loadZoomInkFromDataUrl(zoomValue);
+                    }, 50);
+                }
+            }, [zoomOpen, zoomInputMode, zoomType]);
+const closeZoom = () => {
                 setZoomOpen(false);
                 zoomSaveRef.current = null;
             };
 
             const applyZoom = () => {
                 try {
-                    if (typeof zoomSaveRef.current === 'function') zoomSaveRef.current(zoomValue);
+                    if (typeof zoomSaveRef.current === 'function') {
+                        if (zoomInputMode === 'pen' && zoomType === 'ink') {
+                            const c = zoomInkCanvasRef.current;
+                            let data = zoomValue || '';
+                            if (zoomInkDirtyRef.current) {
+                                data = c ? c.toDataURL('image/png') : '';
+                            }
+                            zoomSaveRef.current(data);
+                        } else {
+                            zoomSaveRef.current(zoomValue);
+                        }
+                    }
                 } finally {
                     closeZoom();
                 }
             };
 
-            const [sellerNotes, setSellerNotes] = useState('Nur für Verkäufer...');
+            const [sellerNotes, setSellerNotes] = useState('');
 
             const [activeCategory, setActiveCategory] = useState(null); 
             const [questionIndex, setQuestionIndex] = useState(0); 
@@ -2119,7 +2302,10 @@ return (
                 offer3: '' 
             }); 
             const [emailText, setEmailText] = useState('');
-            const [emailMode, setEmailMode] = useState('keyboard'); 
+            
+            const [emailInkUrl, setEmailInkUrl] = useState('');
+            const [notesInkUrl, setNotesInkUrl] = useState('');
+const [emailMode, setEmailMode] = useState('keyboard'); 
             const [notesMode, setNotesMode] = useState('keyboard');
 
             const [showWlanModal, setShowWlanModal] = useState(false);
@@ -2999,18 +3185,53 @@ return (
 
                         <aside className="w-[300px] bg-[#f0f6ff] p-3 shrink-0 hidden lg:flex flex-col border-l border-slate-200 z-10 h-full overflow-hidden">
                             <div className="flex-1 flex flex-col min-h-0 gap-2 overflow-y-auto custom-scrollbar">
-                                <SectionCard title="Stammdaten" className="shrink-0 flex flex-col"><div className="grid grid-cols-2 gap-2 mb-2 shrink-0"><div className="relative h-8"><select value={customerType} onChange={(e) => setCustomerType(e.target.value)} className={`w-full h-full bg-slate-50 border rounded-lg pl-2 pr-6 text-[10px] font-medium text-slate-700 focus:ring-1 outline-none border-l-4 ${customerType === "" ? "border-l-red-500" : "border-l-green-500"}`}><option value="" disabled hidden>Kundentyp *</option><option value="Neukunde">Neukunde</option><option value="Bestandskunde">Bestandskunde</option></select></div><div className="relative h-8"><select value={segment} onChange={(e) => setSegment(e.target.value)} className={`w-full h-full bg-slate-50 border rounded-lg pl-2 pr-6 text-[10px] font-medium text-slate-700 focus:ring-1 outline-none border-l-4 ${segment === "" ? "border-l-red-500" : "border-l-green-500"}`}><option value="" disabled hidden>Segment *</option><option value="Privatkunde">Privatkunde</option><option value="Geschäftskunden">Geschäftskunden</option><option value="Vertragsverlängerung">Vertragsverlängerung</option><option value="Junge Leute">Junge Leute</option><option value="Bestes Alter">Bestes Alter</option></select></div></div><div className="relative w-full h-8 border border-slate-200 rounded-md bg-white overflow-hidden group flex items-center shrink-0"><div className="absolute right-1 top-1/2 -translate-y-1/2 z-30 flex items-center gap-1"><button type="button" onClick={() => setEmailMode(prev => prev === 'keyboard' ? 'pen' : 'keyboard')} className="w-7 h-7 rounded-md bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center" title={emailMode === 'keyboard' ? 'Mit Stift schreiben' : 'Zur Tastatur'}>{emailMode === 'keyboard' ? <Icon d={ICONS.Pen} size={14}/> : <Icon d={ICONS.Keyboard} size={14}/>}</button>{emailMode === 'keyboard' && (<button type="button" onClick={() => openZoom('E-Mail Adresse','text', emailText, setEmailText)} className="w-7 h-7 rounded-md bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 flex items-center justify-center" title="Groß schreiben"><Icon d={ICONS.Maximize} size={14} /></button>)}</div>{emailMode === 'keyboard' ? (<div className="relative w-full h-full">
-                                <input type="text" value={emailText} onChange={(e) => setEmailText(e.target.value)} placeholder="E-Mail Adresse" className="w-full h-full px-3 text-[10px] focus:outline-none bg-transparent pr-20" />
-</div>) : (<><canvas ref={emailCanvasRef} className="absolute inset-0 w-full h-full cursor-crosshair" onPointerDown={(e) => startDrawing(e, emailCanvasRef, 'email')} onPointerMove={(e) => draw(e, emailCanvasRef, 'email')} onPointerUp={(e) => stopDrawing(e, emailCanvasRef)} onPointerLeave={(e) => stopDrawing(e, emailCanvasRef)} /><button onClick={() => clearCanvas(emailCanvasRef, 'email')} className="absolute top-1/2 right-1 -translate-y-1/2 p-1 hover:bg-slate-100 rounded text-slate-400 z-30" title="Löschen"><Icon d={ICONS.Trash} size={10}/></button></>)}</div></SectionCard>
+                                <SectionCard title="Stammdaten" className="shrink-0 flex flex-col"><div className="grid grid-cols-2 gap-2 mb-2 shrink-0"><div className="relative h-8"><select value={customerType} onChange={(e) => setCustomerType(e.target.value)} className={`w-full h-full bg-slate-50 border rounded-lg pl-2 pr-6 text-[10px] font-medium text-slate-700 focus:ring-1 outline-none border-l-4 ${customerType === "" ? "border-l-red-500" : "border-l-green-500"}`}><option value="" disabled hidden>Kundentyp *</option><option value="Neukunde">Neukunde</option><option value="Bestandskunde">Bestandskunde</option></select></div><div className="relative h-8"><select value={segment} onChange={(e) => setSegment(e.target.value)} className={`w-full h-full bg-slate-50 border rounded-lg pl-2 pr-6 text-[10px] font-medium text-slate-700 focus:ring-1 outline-none border-l-4 ${segment === "" ? "border-l-red-500" : "border-l-green-500"}`}><option value="" disabled hidden>Segment *</option><option value="Privatkunde">Privatkunde</option><option value="Geschäftskunden">Geschäftskunden</option><option value="Vertragsverlängerung">Vertragsverlängerung</option><option value="Junge Leute">Junge Leute</option><option value="Bestes Alter">Bestes Alter</option></select></div></div><div className="relative w-full h-8 border border-slate-200 rounded-md bg-white overflow-hidden group flex items-center shrink-0"><div className="absolute right-1 top-1/2 -translate-y-1/2 z-30 flex items-center gap-1">
+  <button type="button" onClick={() => openZoom('E-Mail Adresse','ink', emailInkUrl || '', (d)=>{ setEmailInkUrl(d); setEmailText(''); }, 'pen')} className="w-7 h-7 rounded-md bg-white border border-slate-200 flex items-center justify-center" title="Mit Stift schreiben"><Icon d={ICONS.Pen} size={14} /></button>
+  <button type="button" onClick={() => { setEmailText(''); setEmailInkUrl(''); }} className="w-7 h-7 rounded-md bg-white border border-slate-200 flex items-center justify-center" title="Löschen"><Icon d={ICONS.Trash} size={12}/></button>
+</div><div className="relative w-full h-full">
+  {" "}
+  {emailInkUrl && !emailText && (
+    <img src={emailInkUrl} alt="Handschrift E-Mail" className="absolute inset-0 w-full h-full object-contain pointer-events-none px-2 pr-16" />
+  )}
+  <input type="text" value={emailText} onChange={(e) => { const v = e.target.value; setEmailText(v); if (v) setEmailInkUrl(''); }} placeholder="E-Mail Adresse" className={`w-full h-full px-3 text-[10px] focus:outline-none bg-transparent pr-16 ${emailInkUrl && !emailText ? "ink-hide" : ""}`}  style={emailInkUrl && !emailText ? { color: "transparent", caretColor: "transparent" } : undefined} />
+</div>
+</div></SectionCard>
                                 <SectionCard title="Technische Situation" className="shrink-0 flex flex-col"><div className="relative mb-2 w-full h-8 shrink-0">{!isCustomProvider ? (<select value={providerSelect} onChange={(e) => { if (e.target.value === 'Sonstiges') { setIsCustomProvider(true); setProviderSelect('Sonstiges'); } else { setProviderSelect(e.target.value); setIsCustomProvider(false); } }} className={`w-full h-full bg-slate-50 border rounded-md pl-2 pr-6 text-[10px] font-medium text-slate-700 focus:ring-1 outline-none border-l-4 ${providerSelect === "" ? "border-l-red-500" : "border-l-green-500"}`}><option value="" disabled hidden>Derzeitiger DSL-Anbieter *</option><option value="Telekom">Telekom</option><option value="1&1">1&1</option><option value="Vodafone">Vodafone</option><option value="O2">O2</option><option value="Sonstiges">Sonstiges / Eingabe</option></select>) : (<div className="relative w-full h-full border border-slate-200 rounded-md bg-white overflow-hidden group flex items-center border-l-4 border-l-green-500"><div className="absolute right-1 top-1/2 -translate-y-1/2 z-30 flex items-center gap-1"><button type="button" onClick={() => setProviderMode(prev => prev === 'keyboard' ? 'pen' : 'keyboard')} className="w-7 h-7 rounded-md bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center" title={providerMode === 'keyboard' ? 'Mit Stift schreiben' : 'Zur Tastatur'}>{providerMode === 'keyboard' ? <Icon d={ICONS.Pen} size={14}/> : <Icon d={ICONS.Keyboard} size={14}/>}</button>{providerMode === 'keyboard' && (<button type="button" onClick={() => openZoom('Anbieter','text', customProvider, setCustomProvider)} className="w-7 h-7 rounded-md bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 flex items-center justify-center" title="Groß schreiben"><Icon d={ICONS.Maximize} size={14} /></button>)}<button type="button" onClick={() => { setIsCustomProvider(false); setProviderSelect(''); setCustomProvider(''); }} className="w-7 h-7 rounded-md bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center" title="Zurück zur Liste"><Icon d={ICONS.List} size={14}/></button></div>{providerMode === 'keyboard' ? (<div className="relative w-full h-full">
                                 <input type="text" value={customProvider} onChange={(e) => setCustomProvider(e.target.value)} placeholder="Anbieter..." className="w-full h-full px-3 text-[10px] focus:outline-none bg-transparent pr-28" autoFocus />
 </div>) : (<><canvas ref={providerCanvasRef} className="absolute inset-0 w-full h-full cursor-crosshair" onPointerDown={(e) => startDrawing(e, providerCanvasRef, 'provider')} onPointerMove={(e) => draw(e, providerCanvasRef, 'provider')} onPointerUp={(e) => stopDrawing(e, providerCanvasRef)} onPointerLeave={(e) => stopDrawing(e, providerCanvasRef)} /><button onClick={() => clearCanvas(providerCanvasRef, 'provider')} className="absolute top-1/2 right-1 -translate-y-1/2 p-1 hover:bg-slate-100 rounded text-slate-400 z-30" title="Löschen"><Icon d={ICONS.Trash} size={10}/></button></>)}</div>)}</div><button onClick={() => setShowWlanModal(true)} className="w-full h-8 bg-slate-100 text-left px-3 rounded-md text-[10px] font-bold text-slate-700 flex items-center gap-2 border border-slate-200 hover:bg-slate-200 transition-colors shrink-0"><Icon d={ICONS.Wifi} size={14} className="text-slate-500" /> WLAN-Planer öffnen</button>{wlanPrintRec&&<div className="print-reco">{wlanPrintRec}</div>}</SectionCard>
                                 <SectionCard title="Technologie & Speed" className="shrink-0 flex flex-col"><div className="space-y-1 flex flex-col justify-center h-full"><button onClick={() => setShowTechModal(true)} className="w-full h-8 bg-slate-100 text-left px-3 rounded-md text-[10px] font-bold text-slate-700 flex items-center gap-2 border border-slate-200 hover:bg-slate-200 transition-colors"><Icon d={ICONS.Zap} size={14} className="text-slate-500" /> Technologie-Check</button><button onClick={() => setShowSpeedModal(true)} className="w-full h-8 bg-slate-100 text-left px-3 rounded-md text-[10px] font-bold text-slate-700 flex items-center gap-2 border border-slate-200 hover:bg-slate-200 transition-colors"><Icon d={ICONS.Gauge} size={14} className="text-slate-500" /> Speed-Rechner</button>{speedPrintRec&&<div className="print-reco">{speedPrintRec}</div>}</div></SectionCard>
                                 <SectionCard title="Roaming" className="shrink-0 flex flex-col"><div className="flex-1 flex items-center"><button onClick={() => setShowRoamingModal(true)} className="w-full h-8 bg-slate-100 text-left px-3 rounded-md text-[10px] font-bold text-slate-700 flex items-center gap-2 border border-slate-200 hover:bg-slate-200 transition-colors"><Icon d={ICONS.Globe} size={14} className="text-slate-500" /> Roaming Check</button></div></SectionCard>
                                 <SectionCard title="Kosten (Ist)" className="shrink-0 flex flex-col"><div className="flex flex-col justify-center h-full gap-1"><div className="grid grid-cols-2 gap-2"><div><input className="w-full h-7 border border-slate-200 rounded px-2 text-[10px] focus:ring-1 relative z-10 bg-transparent" placeholder="Mobil €" value={costState.mobile} onChange={(e) => handleCostChange('mobile', e)} /><CostBar val={parseCost(costState.mobile)} total={totalCost} colorClass="bg-blue-500" /></div><div><input className="w-full h-7 border border-slate-200 rounded px-2 text-[10px] focus:ring-1 relative z-10 bg-transparent" placeholder="Festnetz €" value={costState.landline} onChange={(e) => handleCostChange('landline', e)} /><CostBar val={parseCost(costState.landline)} total={totalCost} colorClass="bg-cyan-500" /></div></div><div><input className="w-full h-7 border border-slate-200 rounded px-2 text-[10px] focus:ring-1 relative z-10 bg-transparent" placeholder="TV €" value={costState.tv} onChange={(e) => handleCostChange('tv', e)} /><CostBar val={parseCost(costState.tv)} total={totalCost} colorClass="bg-purple-500" /></div></div><div className="bg-slate-100 rounded-md px-2 h-7 flex items-center justify-end text-[11px] font-bold text-slate-700 border border-slate-200 mt-1 shrink-0">{totalCost.toFixed(2)} €}</div></SectionCard>
-                                <SectionCard title="Notizblock" className="flex-1 min-h-0 flex flex-col relative no-print"><div className="absolute top-0 right-0 z-30 p-2 flex items-center gap-1"><button type="button" onClick={() => setNotesMode(prev => prev === 'keyboard' ? 'pen' : 'keyboard')} className="w-9 h-9 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center shadow-sm" title={notesMode === 'keyboard' ? 'Mit Stift schreiben' : 'Zur Tastatur'}>{notesMode === 'keyboard' ? <Icon d={ICONS.Pen} size={18}/> : <Icon d={ICONS.Keyboard} size={18}/>}</button>{notesMode === 'keyboard' && (<button type="button" onClick={() => openZoom('Notiz (Nur für Verkäufer)','textarea', sellerNotes, setSellerNotes)} className="w-9 h-9 rounded-xl bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 flex items-center justify-center shadow-sm" title="Groß schreiben"><Icon d={ICONS.Maximize} size={18} /></button>)}</div>{notesMode === 'keyboard' ? (<div className="relative w-full h-full">
-                                <textarea className="w-full h-full bg-white border border-amber-200 rounded-md p-2 text-sm text-slate-600 resize-none focus:ring-0 flex-1 relative z-10" value={sellerNotes} onChange={(e)=>setSellerNotes(e.target.value)} />
-</div>) : (<><canvas ref={notesCanvasRef} className="absolute inset-0 w-full h-full cursor-crosshair z-10" style={{ backgroundColor: 'white', borderRadius: '0.75rem' }} onPointerDown={(e) => startDrawing(e, notesCanvasRef, 'notes')} onPointerMove={(e) => draw(e, notesCanvasRef, 'notes')} onPointerUp={(e) => stopDrawing(e, notesCanvasRef)} onPointerLeave={(e) => stopDrawing(e, notesCanvasRef)} /><button onClick={() => clearCanvas(notesCanvasRef, 'notes')} className="absolute top-2 right-12 p-1 hover:bg-slate-200 rounded text-slate-400 z-30" title="Löschen"><Icon d={ICONS.Trash} size={14}/></button></>)}</SectionCard>
+                                <SectionCard title="Notizblock" className="flex-1 min-h-0 flex flex-col relative no-print">
+  <div className="absolute top-0 right-0 z-30 p-2 flex items-center gap-1">
+    <button type="button"
+      onClick={() => openZoom('Notiz (Nur für Verkäufer)','ink', notesInkUrl, (d)=>{ setNotesInkUrl(d); setSellerNotes(''); }, 'pen')}
+      className="w-9 h-9 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center shadow-sm"
+      title="Mit Stift schreiben">
+      <Icon d={ICONS.Pen} size={18}/>
+    </button>
+    <button type="button"
+      onClick={() => { setNotesInkUrl(''); }}
+      className="w-9 h-9 rounded-xl bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 flex items-center justify-center shadow-sm"
+      title="Handschrift löschen">
+      <Icon d={ICONS.Trash} size={18}/>
+    </button>
+  </div>
+
+  <div className="relative w-full h-full">
+    {notesInkUrl && !sellerNotes && (
+      <img src={notesInkUrl} alt="Handschrift Notiz" className="absolute inset-0 w-full h-full object-contain pointer-events-none p-2" />
+    )}
+
+    <textarea
+      className={`w-full h-full bg-transparent border border-amber-200 rounded-md p-2 text-sm text-slate-600 resize-none focus:ring-0 flex-1 relative z-10 ${notesInkUrl && !sellerNotes ? "ink-hide" : ""}`}
+      style={notesInkUrl && !sellerNotes ? { color: "transparent", caretColor: "transparent" } : undefined}
+      placeholder="Nur für Verkäufer..."
+      value={sellerNotes}
+      onChange={(e)=>{ const v=e.target.value; setSellerNotes(v); if(v) setNotesInkUrl(''); }}
+    />
+  </div>
+</SectionCard>
                             </div>
                         </aside>
                     </div>
@@ -3086,14 +3307,43 @@ return (
                   <div className="fixed inset-0 z-[999999] bg-black/40 flex items-center justify-center p-4">
                     <div className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-slate-200 p-4">
                       <div className="flex items-center justify-between mb-3">
-                        <div className="text-base font-black text-slate-900">{zoomLabel}</div>
+                        <div className="flex items-center gap-3">
+                          <div className="text-base font-black text-slate-900">{zoomLabel}</div>
+                          <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 border border-slate-200">
+                            <button type="button" onClick={()=>setZoomInputMode('pen')} className={`px-2 py-1 rounded-lg text-xs font-black ${zoomInputMode==='pen'?'bg-white shadow text-slate-900':'text-slate-600 hover:text-slate-900'}`}>✏️ Stift</button>
+                            <button type="button" onClick={()=>setZoomInputMode('keyboard')} className={`px-2 py-1 rounded-lg text-xs font-black ${zoomInputMode==='keyboard'?'bg-white shadow text-slate-900':'text-slate-600 hover:text-slate-900'}`}>⌨ Tastatur</button>
+                          </div>
+                        </div>
                         <button type="button" onClick={closeZoom} className="w-9 h-9 rounded-xl bg-slate-100 hover:bg-slate-200 flex items-center justify-center font-black text-slate-700">✕</button>
                       </div>
 
-                      {zoomType === 'textarea' ? (
+                      {zoomInputMode === 'pen' && (
+                        <div className="mb-2 text-xs text-slate-600">Mit dem <span className="font-black">Stift</span> ins Feld schreiben (Handschrift). Für normale Eingabe auf <span className="font-black">Tastatur</span> umschalten.</div>
+                      )}
+
+                      {(zoomInputMode === 'pen' && zoomType === 'ink') ? (
+                        <div className="w-full">
+                          <div className="flex items-center justify-end mb-2">
+                            <button type="button" onClick={()=>{ zoomInkDirtyRef.current = true; clearZoomInk(); }} className="px-3 py-2 rounded-lg bg-white border border-slate-200 text-sm font-bold text-slate-700 hover:bg-slate-50 flex items-center gap-2">
+                              <Icon d={ICONS.Trash} size={14}/> Löschen
+                            </button>
+                          </div>
+                          <div className="relative w-full h-[24vh] bg-white border border-slate-200 rounded-2xl overflow-hidden ink-paper">
+                            <canvas
+                              ref={zoomInkCanvasRef}
+                              className="absolute inset-0 w-full h-full touch-none cursor-crosshair"
+                              onPointerDown={zoomInkStart}
+                              onPointerMove={zoomInkMove}
+                              onPointerUp={zoomInkEnd}
+                              onPointerCancel={zoomInkEnd}
+                              onPointerLeave={zoomInkEnd}
+                            />
+                          </div>
+                        </div>
+                      ) : (zoomType === 'textarea' ? (
                         <textarea
                           ref={zoomInputRef}
-                          className="w-full h-[55vh] bg-white border border-slate-200 rounded-xl p-3 text-base text-slate-800 resize-none focus:outline-none focus:ring-2 focus:ring-blue-300"
+                          className="w-full h-[55vh] bg-white border border-slate-200 rounded-2xl p-4 text-base text-slate-800 resize-none focus:outline-none focus:ring-2 focus:ring-blue-300"
                           value={zoomValue}
                           onChange={(e)=>setZoomValue(e.target.value)}
                         />
@@ -3101,17 +3351,15 @@ return (
                         <input
                           ref={zoomInputRef}
                           type="text"
-                          className="w-full h-14 bg-white border border-slate-200 rounded-xl px-4 text-lg text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                          className="w-full h-14 bg-white border border-slate-200 rounded-2xl px-4 text-base text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-300"
                           value={zoomValue}
                           onChange={(e)=>setZoomValue(e.target.value)}
                         />
-                      )}
-
-                      <div className="mt-4 flex items-center justify-between gap-2">
+                      ))}<div className="mt-4 flex items-center justify-between gap-2">
                         <div className="text-xs text-slate-500">Tipp: Auf iPad/Android kannst du im großen Feld per Handschrift (Stylus) schreiben – ohne Scroll-Probleme.</div>
                         <div className="flex gap-2">
                           <button type="button" onClick={closeZoom} className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 font-bold text-slate-800">Abbrechen</button>
-                          <button type="button" onClick={applyZoom} className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 font-bold text-white">Übernehmen</button>
+                          <button type="button" onClick={applyZoom} className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 font-bold text-white shadow-sm shadow-blue-200/40">Übernehmen</button>
                         </div>
                       </div>
                     </div>
